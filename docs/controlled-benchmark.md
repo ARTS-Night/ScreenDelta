@@ -21,3 +21,7 @@ so new stats can be recovered without another run.
 This is a measurement fixture, not a replacement for reference-frame
 correctness tests. Results compare only runs produced with the same scenario,
 duration, monitor, and FPS.
+
+The CSV also records fallback-reason, Move Rect, and pointer metadata counters.
+Those counters are diagnostic evidence; they do not themselves change the
+public update transport.

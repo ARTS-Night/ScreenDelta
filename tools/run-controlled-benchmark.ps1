@@ -51,6 +51,14 @@ $rows = foreach ($name in $Scenario) {
             os_frames_acquired = $stats['os_frames_acquired']
             full_payload_bytes = $stats['full_payload_bytes']
             delta_payload_bytes = $stats['delta_payload_bytes']
+            move_rects_observed = $stats['move_rects_observed']
+            pointer_updates = $stats['pointer_updates']
+            separate_pointer_updates = $stats['separate_pointer_updates']
+            pointer_shape_updates = $stats['pointer_shape_updates']
+            full_initial_updates = $stats['full_initial_updates']
+            full_empty_damage_updates = $stats['full_empty_damage_updates']
+            full_large_damage_updates = $stats['full_large_damage_updates']
+            full_fragmented_damage_updates = $stats['full_fragmented_damage_updates']
             readback_ms = $stats['readback']
             raw = $output
         }

@@ -20,8 +20,9 @@ use windows::{
             },
             Dxgi::Common::DXGI_SAMPLE_DESC,
             Dxgi::{
-                CreateDXGIFactory1, DXGI_ERROR_MORE_DATA, DXGI_ERROR_WAIT_TIMEOUT, IDXGIAdapter1,
-                IDXGIFactory1, IDXGIOutput, IDXGIOutput1, IDXGIOutputDuplication,
+                CreateDXGIFactory1, DXGI_ERROR_MORE_DATA, DXGI_ERROR_WAIT_TIMEOUT,
+                DXGI_OUTDUPL_MOVE_RECT, IDXGIAdapter1, IDXGIFactory1, IDXGIOutput, IDXGIOutput1,
+                IDXGIOutputDuplication,
             },
         },
     },
@@ -212,7 +213,24 @@ impl Session {
             Err(error) => return Err(win_error(error)),
         }
         self.stats.os_frames_acquired += 1;
+        if info.LastMouseUpdateTime != 0 {
+            self.stats.pointer_updates += 1;
+            if info.PointerPosition.Visible.as_bool() {
+                self.stats.separate_pointer_updates += 1;
+            }
+            if info.PointerShapeBufferSize != 0 {
+                self.stats.pointer_shape_updates += 1;
+            }
+        }
         self.stats.acquire_wait += acquire_started.elapsed();
+        let moves = match self.move_rects() {
+            Ok(moves) => moves,
+            Err(error) => {
+                unsafe { self.duplication.ReleaseFrame() }.map_err(win_error)?;
+                return Err(error);
+            }
+        };
+        self.stats.move_rects_observed += moves.len() as u64;
         let dirty = match self.dirty_regions() {
             Ok(dirty) => dirty,
             Err(error) => {
@@ -435,6 +453,30 @@ impl Session {
                 )
             })
             .collect())
+    }
+
+    fn move_rects(&self) -> Result<Vec<DXGI_OUTDUPL_MOVE_RECT>, CaptureError> {
+        let mut required = 0;
+        let mut empty = DXGI_OUTDUPL_MOVE_RECT::default();
+        match unsafe {
+            self.duplication
+                .GetFrameMoveRects(0, &mut empty, &mut required)
+        } {
+            Ok(()) => {}
+            Err(error) if error.code() == DXGI_ERROR_MORE_DATA => {}
+            Err(error) => return Err(win_error(error)),
+        }
+        if required == 0 {
+            return Ok(Vec::new());
+        }
+        let count = required as usize / std::mem::size_of::<DXGI_OUTDUPL_MOVE_RECT>();
+        let mut rects = vec![DXGI_OUTDUPL_MOVE_RECT::default(); count];
+        unsafe {
+            self.duplication
+                .GetFrameMoveRects(required, rects.as_mut_ptr(), &mut required)
+        }
+        .map_err(win_error)?;
+        Ok(rects)
     }
 }
 
