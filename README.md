@@ -63,6 +63,9 @@ match capture.try_next_update(Duration::from_millis(16))? {
 Run `cargo run --release --example poll_updates` to print the observed update
 mix and capture timing on an interactive Windows desktop.
 
+For repeatable Windows workload measurements, see
+[`docs/controlled-benchmark.md`](docs/controlled-benchmark.md).
+
 ## Validation
 
 `cargo fmt --check`, `cargo check`, and `cargo test` are expected to pass.
