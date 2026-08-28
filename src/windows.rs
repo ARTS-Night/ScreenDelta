@@ -16,8 +16,8 @@ use windows::{
             },
             Dxgi::Common::DXGI_SAMPLE_DESC,
             Dxgi::{
-                CreateDXGIFactory1, IDXGIAdapter1, IDXGIFactory1, IDXGIOutput, IDXGIOutput1,
-                IDXGIOutputDuplication,
+                CreateDXGIFactory1, DXGI_ERROR_WAIT_TIMEOUT, IDXGIAdapter1, IDXGIFactory1,
+                IDXGIOutput, IDXGIOutput1, IDXGIOutputDuplication,
             },
         },
     },
@@ -68,11 +68,16 @@ impl Session {
     pub(crate) fn next_frame(&mut self) -> Result<Frame, CaptureError> {
         let mut info = unsafe { zeroed() };
         let mut resource = None;
-        unsafe {
-            self.duplication
-                .AcquireNextFrame(1000, &mut info, &mut resource)
+        loop {
+            match unsafe {
+                self.duplication
+                    .AcquireNextFrame(1000, &mut info, &mut resource)
+            } {
+                Ok(()) => break,
+                Err(error) if error.code() == DXGI_ERROR_WAIT_TIMEOUT => continue,
+                Err(error) => return Err(win_error(error)),
+            }
         }
-        .map_err(win_error)?;
         let result = (|| {
             let texture: ID3D11Texture2D = resource
                 .ok_or_else(|| CaptureError::new("DXGI returned no frame"))?
