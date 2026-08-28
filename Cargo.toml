@@ -1,0 +1,16 @@
+[package]
+name = "screendelta"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Windows desktop capture primitives that process only what changed."
+
+[dependencies]
+windows = { version = "0.62.2", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Graphics_Gdi",
+] }
