@@ -80,6 +80,8 @@ impl Session {
         &mut self,
         timeout: Duration,
     ) -> Result<Option<Frame>, CaptureError> {
+        self.stats.poll_attempts += 1;
+        let acquire_started = Instant::now();
         let mut info = unsafe { zeroed() };
         let mut resource = None;
         let milliseconds = timeout.as_millis().min(u32::MAX as u128) as u32;
@@ -88,9 +90,15 @@ impl Session {
                 .AcquireNextFrame(milliseconds, &mut info, &mut resource)
         } {
             Ok(()) => {}
-            Err(error) if error.code() == DXGI_ERROR_WAIT_TIMEOUT => return Ok(None),
+            Err(error) if error.code() == DXGI_ERROR_WAIT_TIMEOUT => {
+                self.stats.unchanged_polls += 1;
+                self.stats.acquire_wait += acquire_started.elapsed();
+                return Ok(None);
+            }
             Err(error) => return Err(win_error(error)),
         }
+        self.stats.acquire_wait += acquire_started.elapsed();
+        let readback_started = Instant::now();
         let result = (|| {
             let texture: ID3D11Texture2D = resource
                 .ok_or_else(|| CaptureError::new("DXGI returned no frame"))?
@@ -127,6 +135,7 @@ impl Session {
             }
             unsafe { self.context.Unmap(&self.staging, 0) };
             self.stats.frames_captured += 1;
+            self.stats.readback += readback_started.elapsed();
             Ok(Frame {
                 timestamp: self.started.elapsed(),
                 index: self.stats.frames_captured - 1,

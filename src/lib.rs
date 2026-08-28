@@ -87,6 +87,10 @@ pub struct CaptureConfig {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct CaptureStats {
     pub frames_captured: u64,
+    pub poll_attempts: u64,
+    pub unchanged_polls: u64,
+    pub acquire_wait: Duration,
+    pub readback: Duration,
 }
 
 #[derive(Debug)]
