@@ -9,7 +9,7 @@ use std::{
 };
 use windows::{
     Win32::{
-        Foundation::HMODULE,
+        Foundation::{HMODULE, RECT},
         Graphics::{
             Direct3D::D3D_DRIVER_TYPE_UNKNOWN,
             Direct3D11::{
@@ -20,8 +20,8 @@ use windows::{
             },
             Dxgi::Common::DXGI_SAMPLE_DESC,
             Dxgi::{
-                CreateDXGIFactory1, DXGI_ERROR_WAIT_TIMEOUT, IDXGIAdapter1, IDXGIFactory1,
-                IDXGIOutput, IDXGIOutput1, IDXGIOutputDuplication,
+                CreateDXGIFactory1, DXGI_ERROR_MORE_DATA, DXGI_ERROR_WAIT_TIMEOUT, IDXGIAdapter1,
+                IDXGIFactory1, IDXGIOutput, IDXGIOutput1, IDXGIOutputDuplication,
             },
         },
     },
@@ -33,6 +33,7 @@ pub(crate) struct Session {
     duplication: IDXGIOutputDuplication,
     staging: ID3D11Texture2D,
     region: Region,
+    output_region: Region,
     started: Instant,
     stats: CaptureStats,
 }
@@ -65,6 +66,7 @@ impl Session {
             duplication,
             staging: staging.ok_or_else(|| CaptureError::new("D3D11 staging texture missing"))?,
             region: t.region,
+            output_region: t.output_region,
             started: Instant::now(),
             stats: CaptureStats::default(),
         })
@@ -98,6 +100,22 @@ impl Session {
             Err(error) => return Err(win_error(error)),
         }
         self.stats.acquire_wait += acquire_started.elapsed();
+        let dirty = match self.dirty_regions() {
+            Ok(dirty) => dirty,
+            Err(error) => {
+                unsafe { self.duplication.ReleaseFrame() }.map_err(win_error)?;
+                return Err(error);
+            }
+        };
+        if !dirty.is_empty()
+            && !dirty
+                .iter()
+                .any(|damage| damage.intersection(self.region).is_some())
+        {
+            self.stats.region_skipped_updates += 1;
+            unsafe { self.duplication.ReleaseFrame() }.map_err(win_error)?;
+            return Ok(None);
+        }
         let readback_started = Instant::now();
         let result = (|| {
             let texture: ID3D11Texture2D = resource
@@ -105,11 +123,11 @@ impl Session {
                 .cast()
                 .map_err(win_error)?;
             let b = D3D11_BOX {
-                left: self.region.x as u32,
-                top: self.region.y as u32,
+                left: (self.region.x - self.output_region.x) as u32,
+                top: (self.region.y - self.output_region.y) as u32,
                 front: 0,
-                right: self.region.x as u32 + self.region.size.width,
-                bottom: self.region.y as u32 + self.region.size.height,
+                right: (self.region.x - self.output_region.x) as u32 + self.region.size.width,
+                bottom: (self.region.y - self.output_region.y) as u32 + self.region.size.height,
                 back: 1,
             };
             unsafe {
@@ -155,10 +173,45 @@ impl Session {
     pub(crate) fn stats(&self) -> CaptureStats {
         self.stats
     }
+
+    fn dirty_regions(&self) -> Result<Vec<Region>, CaptureError> {
+        let mut required = 0;
+        let mut empty = RECT::default();
+        match unsafe {
+            self.duplication
+                .GetFrameDirtyRects(0, &mut empty, &mut required)
+        } {
+            Ok(()) => {}
+            Err(error) if error.code() == DXGI_ERROR_MORE_DATA => {}
+            Err(error) => return Err(win_error(error)),
+        }
+        if required == 0 {
+            return Ok(Vec::new());
+        }
+        let count = required as usize / std::mem::size_of::<RECT>();
+        let mut rects = vec![RECT::default(); count];
+        unsafe {
+            self.duplication
+                .GetFrameDirtyRects(required, rects.as_mut_ptr(), &mut required)
+        }
+        .map_err(win_error)?;
+        Ok(rects
+            .into_iter()
+            .filter_map(|rect| {
+                Region::new(
+                    self.output_region.x + rect.left,
+                    self.output_region.y + rect.top,
+                    (rect.right - rect.left) as u32,
+                    (rect.bottom - rect.top) as u32,
+                )
+            })
+            .collect())
+    }
 }
 struct Target {
     adapter: IDXGIAdapter1,
     output: IDXGIOutput,
+    output_region: Region,
     region: Region,
 }
 fn find_output(source: CaptureSource) -> Result<Target, CaptureError> {
@@ -187,6 +240,7 @@ fn find_output(source: CaptureSource) -> Result<Target, CaptureError> {
             return Ok(Target {
                 adapter,
                 output,
+                output_region: r,
                 region,
             });
         }

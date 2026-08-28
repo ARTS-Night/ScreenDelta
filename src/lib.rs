@@ -89,6 +89,7 @@ pub struct CaptureStats {
     pub frames_captured: u64,
     pub poll_attempts: u64,
     pub unchanged_polls: u64,
+    pub region_skipped_updates: u64,
     pub acquire_wait: Duration,
     pub readback: Duration,
 }
