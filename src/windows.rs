@@ -1,6 +1,6 @@
 use crate::{
-    CaptureConfig, CaptureError, CaptureSource, CaptureStats, CpuFrame, Frame, MonitorId,
-    MonitorInfo, PixelFormat, Region,
+    CaptureConfig, CaptureError, CaptureSource, CaptureStats, CaptureUpdate, CpuFrame, DeltaFrame,
+    DeltaRegion, Frame, MonitorId, MonitorInfo, PixelFormat, Region,
 };
 use std::{
     mem::zeroed,
@@ -29,12 +29,15 @@ use windows::{
 };
 
 pub(crate) struct Session {
+    device: ID3D11Device,
     context: ID3D11DeviceContext,
     duplication: IDXGIOutputDuplication,
     staging: ID3D11Texture2D,
     region: Region,
     output_region: Region,
     started: Instant,
+    emitted_initial: bool,
+    next_index: u64,
     stats: CaptureStats,
 }
 impl Session {
@@ -62,12 +65,15 @@ impl Session {
         let mut staging = None;
         unsafe { device.CreateTexture2D(&desc, None, Some(&mut staging)) }.map_err(win_error)?;
         Ok(Self {
+            device,
             context,
             duplication,
             staging: staging.ok_or_else(|| CaptureError::new("D3D11 staging texture missing"))?,
             region: t.region,
             output_region: t.output_region,
             started: Instant::now(),
+            emitted_initial: false,
+            next_index: 0,
             stats: CaptureStats::default(),
         })
     }
@@ -99,6 +105,7 @@ impl Session {
             }
             Err(error) => return Err(win_error(error)),
         }
+        self.stats.os_frames_acquired += 1;
         self.stats.acquire_wait += acquire_started.elapsed();
         let dirty = match self.dirty_regions() {
             Ok(dirty) => dirty,
@@ -153,10 +160,11 @@ impl Session {
             }
             unsafe { self.context.Unmap(&self.staging, 0) };
             self.stats.frames_captured += 1;
+            self.stats.full_updates += 1;
             self.stats.readback += readback_started.elapsed();
-            Ok(Frame {
+            let frame = Frame {
                 timestamp: self.started.elapsed(),
-                index: self.stats.frames_captured - 1,
+                index: self.next_index,
                 region: self.region,
                 cpu: CpuFrame {
                     width: self.region.size.width,
@@ -165,13 +173,213 @@ impl Session {
                     format: PixelFormat::Bgra8,
                     data,
                 },
-            })
+            };
+            self.next_index += 1;
+            self.emitted_initial = true;
+            Ok(frame)
         })();
         unsafe { self.duplication.ReleaseFrame() }.map_err(win_error)?;
         result.map(Some)
     }
+
+    pub(crate) fn try_next_update(
+        &mut self,
+        timeout: Duration,
+    ) -> Result<CaptureUpdate, CaptureError> {
+        self.stats.poll_attempts += 1;
+        let acquire_started = Instant::now();
+        let mut info = unsafe { zeroed() };
+        let mut resource = None;
+        let milliseconds = timeout.as_millis().min(u32::MAX as u128) as u32;
+        match unsafe {
+            self.duplication
+                .AcquireNextFrame(milliseconds, &mut info, &mut resource)
+        } {
+            Ok(()) => {}
+            Err(error) if error.code() == DXGI_ERROR_WAIT_TIMEOUT => {
+                self.stats.unchanged_polls += 1;
+                self.stats.unchanged_updates += 1;
+                self.stats.acquire_wait += acquire_started.elapsed();
+                return Ok(CaptureUpdate::Unchanged {
+                    timestamp: self.started.elapsed(),
+                    index: self.next_index,
+                });
+            }
+            Err(error) => return Err(win_error(error)),
+        }
+        self.stats.os_frames_acquired += 1;
+        self.stats.acquire_wait += acquire_started.elapsed();
+        let dirty = match self.dirty_regions() {
+            Ok(dirty) => dirty,
+            Err(error) => {
+                unsafe { self.duplication.ReleaseFrame() }.map_err(win_error)?;
+                return Err(error);
+            }
+        };
+        let relevant: Vec<_> = dirty
+            .iter()
+            .filter_map(|damage| damage.intersection(self.region))
+            .collect();
+        if !dirty.is_empty() && relevant.is_empty() {
+            self.stats.region_skipped_updates += 1;
+            self.stats.unchanged_updates += 1;
+            unsafe { self.duplication.ReleaseFrame() }.map_err(win_error)?;
+            return Ok(CaptureUpdate::Unchanged {
+                timestamp: self.started.elapsed(),
+                index: self.next_index,
+            });
+        }
+        let result = (|| {
+            let texture: ID3D11Texture2D = resource
+                .ok_or_else(|| CaptureError::new("DXGI returned no frame"))?
+                .cast()
+                .map_err(win_error)?;
+            let canvas_pixels =
+                u64::from(self.region.size.width) * u64::from(self.region.size.height);
+            let dirty_pixels: u64 = relevant
+                .iter()
+                .map(|region| u64::from(region.size.width) * u64::from(region.size.height))
+                .sum();
+            // A delta is useful only while its raw payload is decisively
+            // smaller than a complete canvas. Empty dirty metadata remains a
+            // conservative Full fallback because move metadata is not yet
+            // represented in the public update model.
+            let use_delta = self.emitted_initial
+                && !relevant.is_empty()
+                && relevant.len() <= 32
+                && dirty_pixels.saturating_mul(2) < canvas_pixels;
+            if use_delta {
+                let readback_started = Instant::now();
+                let mut regions = Vec::with_capacity(relevant.len());
+                for global in relevant {
+                    let pixels = self.readback_region(&texture, global)?;
+                    regions.push(DeltaRegion {
+                        region: Region::new(
+                            global.x - self.region.x,
+                            global.y - self.region.y,
+                            global.size.width,
+                            global.size.height,
+                        )
+                        .expect("intersection cannot have negative local coordinates"),
+                        pixels,
+                    });
+                }
+                self.stats.frames_captured += 1;
+                self.stats.delta_updates += 1;
+                self.stats.delta_regions += regions.len() as u64;
+                self.stats.readback += readback_started.elapsed();
+                let update = CaptureUpdate::Delta(DeltaFrame {
+                    timestamp: self.started.elapsed(),
+                    index: self.next_index,
+                    canvas: self.region.size,
+                    regions,
+                });
+                self.next_index += 1;
+                Ok(update)
+            } else {
+                let readback_started = Instant::now();
+                let frame = self.readback_full(&texture)?;
+                self.stats.frames_captured += 1;
+                self.stats.full_updates += 1;
+                self.stats.readback += readback_started.elapsed();
+                self.emitted_initial = true;
+                let update = CaptureUpdate::Full(Frame {
+                    timestamp: self.started.elapsed(),
+                    index: self.next_index,
+                    region: self.region,
+                    cpu: frame,
+                });
+                self.next_index += 1;
+                Ok(update)
+            }
+        })();
+        unsafe { self.duplication.ReleaseFrame() }.map_err(win_error)?;
+        result
+    }
     pub(crate) fn stats(&self) -> CaptureStats {
         self.stats
+    }
+
+    fn readback_full(&self, texture: &ID3D11Texture2D) -> Result<CpuFrame, CaptureError> {
+        self.readback_into(texture, self.region, &self.staging)
+    }
+
+    fn readback_region(
+        &self,
+        texture: &ID3D11Texture2D,
+        region: Region,
+    ) -> Result<CpuFrame, CaptureError> {
+        let mut staging_desc = D3D11_TEXTURE2D_DESC::default();
+        unsafe { self.staging.GetDesc(&mut staging_desc) };
+        let format = staging_desc.Format;
+        let desc = D3D11_TEXTURE2D_DESC {
+            Width: region.size.width,
+            Height: region.size.height,
+            MipLevels: 1,
+            ArraySize: 1,
+            Format: format,
+            SampleDesc: DXGI_SAMPLE_DESC {
+                Count: 1,
+                Quality: 0,
+            },
+            Usage: D3D11_USAGE_STAGING,
+            BindFlags: 0,
+            CPUAccessFlags: D3D11_CPU_ACCESS_READ.0 as u32,
+            MiscFlags: 0,
+        };
+        let mut staging = None;
+        unsafe { self.device.CreateTexture2D(&desc, None, Some(&mut staging)) }
+            .map_err(win_error)?;
+        let staging =
+            staging.ok_or_else(|| CaptureError::new("D3D11 delta staging texture missing"))?;
+        self.readback_into(texture, region, &staging)
+    }
+
+    fn readback_into(
+        &self,
+        texture: &ID3D11Texture2D,
+        region: Region,
+        staging: &ID3D11Texture2D,
+    ) -> Result<CpuFrame, CaptureError> {
+        let x = (region.x - self.output_region.x) as u32;
+        let y = (region.y - self.output_region.y) as u32;
+        let b = D3D11_BOX {
+            left: x,
+            top: y,
+            front: 0,
+            right: x + region.size.width,
+            bottom: y + region.size.height,
+            back: 1,
+        };
+        unsafe {
+            self.context
+                .CopySubresourceRegion(staging, 0, 0, 0, 0, texture, 0, Some(&b))
+        };
+        let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+        unsafe {
+            self.context
+                .Map(staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))
+        }
+        .map_err(win_error)?;
+        let row = region.size.width as usize * 4;
+        let mut data = vec![0; row * region.size.height as usize];
+        for y in 0..region.size.height as usize {
+            let src = unsafe {
+                slice::from_raw_parts(
+                    (mapped.pData as *const u8).add(y * mapped.RowPitch as usize),
+                    row,
+                )
+            };
+            data[y * row..(y + 1) * row].copy_from_slice(src);
+        }
+        unsafe { self.context.Unmap(staging, 0) };
+        Ok(CpuFrame {
+            width: region.size.width,
+            height: region.size.height,
+            stride: row,
+            format: PixelFormat::Bgra8,
+            data,
+        })
     }
 
     fn dirty_regions(&self) -> Result<Vec<Region>, CaptureError> {

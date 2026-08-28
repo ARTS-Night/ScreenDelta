@@ -63,6 +63,11 @@ pub struct DeltaRegion {
 pub struct DeltaFrame {
     pub timestamp: Duration,
     pub index: u64,
+    /// Size of the capture canvas that this update modifies.
+    pub canvas: Size,
+    /// Regions use capture-local coordinates, so `(0, 0)` is the top-left of
+    /// the configured capture source even when the monitor has a negative
+    /// virtual-desktop position.
     pub regions: Vec<DeltaRegion>,
 }
 
@@ -106,7 +111,13 @@ pub struct CaptureConfig {
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct CaptureStats {
+    /// Frames acquired from DXGI before ScreenDelta's filtering.
+    pub os_frames_acquired: u64,
     pub frames_captured: u64,
+    pub full_updates: u64,
+    pub delta_updates: u64,
+    pub delta_regions: u64,
+    pub unchanged_updates: u64,
     pub poll_attempts: u64,
     pub unchanged_polls: u64,
     pub region_skipped_updates: u64,
@@ -158,6 +169,20 @@ impl CaptureSession {
     pub fn try_next_frame(&mut self, timeout: Duration) -> Result<Option<Frame>, CaptureError> {
         #[cfg(target_os = "windows")]
         return self.inner.try_next_frame(timeout);
+        #[cfg(not(target_os = "windows"))]
+        {
+            let _ = timeout;
+            Err(CaptureError::new("ScreenDelta v0.1 supports Windows only"))
+        }
+    }
+
+    /// Returns the most compact update that represents the newest desktop
+    /// state. The first delivered update is always [`CaptureUpdate::Full`].
+    /// Subsequent small DXGI dirty regions are returned in capture-local
+    /// coordinates; a large or uncertain change falls back to `Full`.
+    pub fn try_next_update(&mut self, timeout: Duration) -> Result<CaptureUpdate, CaptureError> {
+        #[cfg(target_os = "windows")]
+        return self.inner.try_next_update(timeout);
         #[cfg(not(target_os = "windows"))]
         {
             let _ = timeout;
