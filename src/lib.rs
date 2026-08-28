@@ -124,6 +124,17 @@ impl CaptureSession {
         Err(CaptureError::new("ScreenDelta v0.1 supports Windows only"))
     }
 
+    /// Returns `Ok(None)` when the desktop did not change before `timeout`.
+    pub fn try_next_frame(&mut self, timeout: Duration) -> Result<Option<Frame>, CaptureError> {
+        #[cfg(target_os = "windows")]
+        return self.inner.try_next_frame(timeout);
+        #[cfg(not(target_os = "windows"))]
+        {
+            let _ = timeout;
+            Err(CaptureError::new("ScreenDelta v0.1 supports Windows only"))
+        }
+    }
+
     pub fn stats(&self) -> CaptureStats {
         #[cfg(target_os = "windows")]
         return self.inner.stats();

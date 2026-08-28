@@ -2,7 +2,11 @@ use crate::{
     CaptureConfig, CaptureError, CaptureSource, CaptureStats, CpuFrame, Frame, MonitorId,
     MonitorInfo, PixelFormat, Region,
 };
-use std::{mem::zeroed, slice, time::Instant};
+use std::{
+    mem::zeroed,
+    slice,
+    time::{Duration, Instant},
+};
 use windows::{
     Win32::{
         Foundation::HMODULE,
@@ -66,17 +70,26 @@ impl Session {
         })
     }
     pub(crate) fn next_frame(&mut self) -> Result<Frame, CaptureError> {
+        loop {
+            if let Some(frame) = self.try_next_frame(Duration::from_secs(1))? {
+                return Ok(frame);
+            }
+        }
+    }
+    pub(crate) fn try_next_frame(
+        &mut self,
+        timeout: Duration,
+    ) -> Result<Option<Frame>, CaptureError> {
         let mut info = unsafe { zeroed() };
         let mut resource = None;
-        loop {
-            match unsafe {
-                self.duplication
-                    .AcquireNextFrame(1000, &mut info, &mut resource)
-            } {
-                Ok(()) => break,
-                Err(error) if error.code() == DXGI_ERROR_WAIT_TIMEOUT => continue,
-                Err(error) => return Err(win_error(error)),
-            }
+        let milliseconds = timeout.as_millis().min(u32::MAX as u128) as u32;
+        match unsafe {
+            self.duplication
+                .AcquireNextFrame(milliseconds, &mut info, &mut resource)
+        } {
+            Ok(()) => {}
+            Err(error) if error.code() == DXGI_ERROR_WAIT_TIMEOUT => return Ok(None),
+            Err(error) => return Err(win_error(error)),
         }
         let result = (|| {
             let texture: ID3D11Texture2D = resource
@@ -128,7 +141,7 @@ impl Session {
             })
         })();
         unsafe { self.duplication.ReleaseFrame() }.map_err(win_error)?;
-        result
+        result.map(Some)
     }
     pub(crate) fn stats(&self) -> CaptureStats {
         self.stats
