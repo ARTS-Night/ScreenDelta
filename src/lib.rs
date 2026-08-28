@@ -66,6 +66,11 @@ impl Frame {
     pub fn readback(&self) -> Result<CpuFrame, CaptureError> {
         Ok(self.cpu.clone())
     }
+
+    /// Consumes the frame and transfers its CPU buffer without another copy.
+    pub fn into_readback(self) -> Result<CpuFrame, CaptureError> {
+        Ok(self.cpu)
+    }
 }
 
 #[derive(Clone, Debug)]
