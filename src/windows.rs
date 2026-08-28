@@ -161,6 +161,10 @@ impl Session {
             unsafe { self.context.Unmap(&self.staging, 0) };
             self.stats.frames_captured += 1;
             self.stats.full_updates += 1;
+            self.stats.full_payload_bytes += data.len() as u64;
+            if !self.emitted_initial {
+                self.stats.full_initial_updates += 1;
+            }
             self.stats.readback += readback_started.elapsed();
             let frame = Frame {
                 timestamp: self.started.elapsed(),
@@ -240,14 +244,20 @@ impl Session {
                 .iter()
                 .map(|region| u64::from(region.size.width) * u64::from(region.size.height))
                 .sum();
-            // A delta is useful only while its raw payload is decisively
-            // smaller than a complete canvas. Empty dirty metadata remains a
-            // conservative Full fallback because move metadata is not yet
-            // represented in the public update model.
-            let use_delta = self.emitted_initial
-                && !relevant.is_empty()
-                && relevant.len() <= 32
-                && dirty_pixels.saturating_mul(2) < canvas_pixels;
+            let full_reason = if !self.emitted_initial {
+                Some(FullReason::Initial)
+            } else if relevant.is_empty() {
+                // Empty dirty metadata may accompany DXGI move metadata, which
+                // is not represented as a public update yet.
+                Some(FullReason::EmptyDamage)
+            } else if relevant.len() > 32 {
+                Some(FullReason::FragmentedDamage)
+            } else if dirty_pixels.saturating_mul(2) >= canvas_pixels {
+                Some(FullReason::LargeDamage)
+            } else {
+                None
+            };
+            let use_delta = full_reason.is_none();
             if use_delta {
                 let readback_started = Instant::now();
                 let mut regions = Vec::with_capacity(relevant.len());
@@ -267,6 +277,10 @@ impl Session {
                 self.stats.frames_captured += 1;
                 self.stats.delta_updates += 1;
                 self.stats.delta_regions += regions.len() as u64;
+                self.stats.delta_payload_bytes += regions
+                    .iter()
+                    .map(|region| region.pixels.data.len() as u64)
+                    .sum::<u64>();
                 self.stats.readback += readback_started.elapsed();
                 let update = CaptureUpdate::Delta(DeltaFrame {
                     timestamp: self.started.elapsed(),
@@ -281,6 +295,13 @@ impl Session {
                 let frame = self.readback_full(&texture)?;
                 self.stats.frames_captured += 1;
                 self.stats.full_updates += 1;
+                self.stats.full_payload_bytes += frame.data.len() as u64;
+                match full_reason.expect("Full fallback needs a reason") {
+                    FullReason::Initial => self.stats.full_initial_updates += 1,
+                    FullReason::EmptyDamage => self.stats.full_empty_damage_updates += 1,
+                    FullReason::LargeDamage => self.stats.full_large_damage_updates += 1,
+                    FullReason::FragmentedDamage => self.stats.full_fragmented_damage_updates += 1,
+                }
                 self.stats.readback += readback_started.elapsed();
                 self.emitted_initial = true;
                 let update = CaptureUpdate::Full(Frame {
@@ -416,6 +437,15 @@ impl Session {
             .collect())
     }
 }
+
+#[derive(Clone, Copy)]
+enum FullReason {
+    Initial,
+    EmptyDamage,
+    LargeDamage,
+    FragmentedDamage,
+}
+
 struct Target {
     adapter: IDXGIAdapter1,
     output: IDXGIOutput,
