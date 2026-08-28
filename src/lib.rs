@@ -53,6 +53,26 @@ pub struct Frame {
     cpu: CpuFrame,
 }
 
+#[derive(Clone, Debug)]
+pub struct DeltaRegion {
+    pub region: Region,
+    pub pixels: CpuFrame,
+}
+
+#[derive(Clone, Debug)]
+pub struct DeltaFrame {
+    pub timestamp: Duration,
+    pub index: u64,
+    pub regions: Vec<DeltaRegion>,
+}
+
+#[derive(Clone, Debug)]
+pub enum CaptureUpdate {
+    Full(Frame),
+    Delta(DeltaFrame),
+    Unchanged { timestamp: Duration, index: u64 },
+}
+
 impl Frame {
     pub fn timestamp(&self) -> Duration {
         self.timestamp
