@@ -1,6 +1,8 @@
 use std::time::{Duration, Instant};
 
-use screendelta::{CaptureConfig, CaptureSession, CaptureSource, FramePacer, Region, monitors};
+use screendelta::{
+    CaptureConfig, CaptureSession, CaptureSource, CursorCapture, FramePacer, Region, monitors,
+};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<_> = std::env::args().collect();
@@ -13,7 +15,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ),
         _ => CaptureSource::Monitor(monitor.id),
     };
-    let mut session = CaptureSession::start(CaptureConfig { source })?;
+    let mut session = CaptureSession::start(CaptureConfig {
+        source,
+        cursor: CursorCapture::Exclude,
+    })?;
     let mut pacer = FramePacer::new(fps)?;
     let started = Instant::now();
     while started.elapsed() < Duration::from_secs(seconds) {

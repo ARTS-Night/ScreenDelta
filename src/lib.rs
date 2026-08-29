@@ -104,9 +104,19 @@ pub enum CaptureSource {
     Region(Region),
 }
 
+/// Whether desktop-duplication pointer shapes are composited into delivered
+/// CPU pixels. This is independent of any application-specific cursor UI.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum CursorCapture {
+    #[default]
+    Exclude,
+    Include,
+}
+
 #[derive(Clone, Debug)]
 pub struct CaptureConfig {
     pub source: CaptureSource,
+    pub cursor: CursorCapture,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -131,6 +141,8 @@ pub struct CaptureStats {
     pub pointer_updates: u64,
     pub separate_pointer_updates: u64,
     pub pointer_shape_updates: u64,
+    pub cursor_damage_regions: u64,
+    pub cursor_composited_updates: u64,
     /// DXGI acquisitions that changed only pointer metadata. The desktop
     /// texture has no matching pixel damage, so they are not full read back.
     pub pointer_only_updates: u64,

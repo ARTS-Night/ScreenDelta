@@ -1,6 +1,6 @@
 use crate::{
-    CaptureConfig, CaptureError, CaptureSource, CaptureStats, CaptureUpdate, CpuFrame, DeltaFrame,
-    DeltaRegion, Frame, MonitorId, MonitorInfo, PixelFormat, Region,
+    CaptureConfig, CaptureError, CaptureSource, CaptureStats, CaptureUpdate, CpuFrame,
+    CursorCapture, DeltaFrame, DeltaRegion, Frame, MonitorId, MonitorInfo, PixelFormat, Region,
 };
 use std::{
     mem::zeroed,
@@ -21,8 +21,9 @@ use windows::{
             Dxgi::Common::DXGI_SAMPLE_DESC,
             Dxgi::{
                 CreateDXGIFactory1, DXGI_ERROR_MORE_DATA, DXGI_ERROR_WAIT_TIMEOUT,
-                DXGI_OUTDUPL_MOVE_RECT, IDXGIAdapter1, IDXGIFactory1, IDXGIOutput, IDXGIOutput1,
-                IDXGIOutputDuplication,
+                DXGI_OUTDUPL_MOVE_RECT, DXGI_OUTDUPL_POINTER_SHAPE_INFO,
+                DXGI_OUTDUPL_POINTER_SHAPE_TYPE_COLOR, IDXGIAdapter1, IDXGIFactory1, IDXGIOutput,
+                IDXGIOutput1, IDXGIOutputDuplication,
             },
         },
     },
@@ -42,6 +43,8 @@ pub(crate) struct Session {
     emitted_initial: bool,
     next_index: u64,
     last_pointer_update_time: i64,
+    cursor: CursorState,
+    capture_cursor: CursorCapture,
     stats: CaptureStats,
 }
 
@@ -49,6 +52,34 @@ struct RegionStaging {
     width: u32,
     height: u32,
     texture: ID3D11Texture2D,
+}
+
+#[derive(Clone, Default)]
+struct CursorState {
+    position: Option<windows::Win32::Foundation::POINT>,
+    shape: Option<CursorShape>,
+}
+
+#[derive(Clone)]
+struct CursorShape {
+    width: u32,
+    height: u32,
+    pitch: u32,
+    hotspot: windows::Win32::Foundation::POINT,
+    bgra: Vec<u8>,
+}
+
+impl CursorState {
+    fn bounds(&self) -> Option<Region> {
+        let position = self.position?;
+        let shape = self.shape.as_ref()?;
+        Region::new(
+            position.x.saturating_sub(shape.hotspot.x),
+            position.y.saturating_sub(shape.hotspot.y),
+            shape.width,
+            shape.height,
+        )
+    }
 }
 impl Session {
     pub(crate) fn start(config: CaptureConfig) -> Result<Self, CaptureError> {
@@ -87,6 +118,8 @@ impl Session {
             emitted_initial: false,
             next_index: 0,
             last_pointer_update_time: 0,
+            cursor: CursorState::default(),
+            capture_cursor: config.cursor,
             stats: CaptureStats::default(),
         })
     }
@@ -119,6 +152,10 @@ impl Session {
             Err(error) => return Err(win_error(error)),
         }
         self.stats.os_frames_acquired += 1;
+        if let Err(error) = self.update_cursor(&info, !self.emitted_initial) {
+            unsafe { self.duplication.ReleaseFrame() }.map_err(win_error)?;
+            return Err(error);
+        }
         self.stats.acquire_wait += acquire_started.elapsed();
         let dirty = match self.dirty_regions() {
             Ok(dirty) => dirty,
@@ -179,17 +216,19 @@ impl Session {
                 self.stats.full_initial_updates += 1;
             }
             self.stats.readback += readback_started.elapsed();
+            let mut cpu = CpuFrame {
+                width: self.region.size.width,
+                height: self.region.size.height,
+                stride: row,
+                format: PixelFormat::Bgra8,
+                data,
+            };
+            self.composite_cursor(&mut cpu, self.region);
             let frame = Frame {
                 timestamp: self.started.elapsed(),
                 index: self.next_index,
                 region: self.region,
-                cpu: CpuFrame {
-                    width: self.region.size.width,
-                    height: self.region.size.height,
-                    stride: row,
-                    format: PixelFormat::Bgra8,
-                    data,
-                },
+                cpu,
             };
             self.next_index += 1;
             self.emitted_initial = true;
@@ -237,6 +276,13 @@ impl Session {
                 self.stats.pointer_shape_updates += 1;
             }
         }
+        let cursor_damage = match self.update_cursor(&info, pointer_changed) {
+            Ok(damage) => damage,
+            Err(error) => {
+                unsafe { self.duplication.ReleaseFrame() }.map_err(win_error)?;
+                return Err(error);
+            }
+        };
         self.stats.acquire_wait += acquire_started.elapsed();
         let moves = match self.move_rects() {
             Ok(moves) => moves,
@@ -256,6 +302,8 @@ impl Session {
         let move_damage = move_damage_regions(&moves, self.output_region);
         self.stats.move_damage_regions += move_damage.len() as u64;
         damage.extend(move_damage);
+        self.stats.cursor_damage_regions += cursor_damage.len() as u64;
+        damage.extend(cursor_damage);
         let relevant = merge_overlapping_regions(
             damage
                 .iter()
@@ -314,7 +362,8 @@ impl Session {
                 let readback_started = Instant::now();
                 let mut regions = Vec::with_capacity(relevant.len());
                 for global in relevant {
-                    let pixels = self.readback_region(&texture, global)?;
+                    let mut pixels = self.readback_region(&texture, global)?;
+                    self.composite_cursor(&mut pixels, global);
                     regions.push(DeltaRegion {
                         region: Region::new(
                             global.x - self.region.x,
@@ -344,7 +393,8 @@ impl Session {
                 Ok(update)
             } else {
                 let readback_started = Instant::now();
-                let frame = self.readback_full(&texture)?;
+                let mut frame = self.readback_full(&texture)?;
+                self.composite_cursor(&mut frame, self.region);
                 self.stats.frames_captured += 1;
                 self.stats.full_updates += 1;
                 self.stats.full_payload_bytes += frame.data.len() as u64;
@@ -371,6 +421,115 @@ impl Session {
     }
     pub(crate) fn stats(&self) -> CaptureStats {
         self.stats
+    }
+
+    fn update_cursor(
+        &mut self,
+        info: &windows::Win32::Graphics::Dxgi::DXGI_OUTDUPL_FRAME_INFO,
+        pointer_changed: bool,
+    ) -> Result<Vec<Region>, CaptureError> {
+        if self.capture_cursor == CursorCapture::Exclude {
+            return Ok(Vec::new());
+        }
+        let before = self.cursor.bounds();
+        let shape_changed = info.PointerShapeBufferSize != 0;
+        if shape_changed {
+            self.cursor.shape = self.read_cursor_shape(info.PointerShapeBufferSize)?;
+        }
+        if pointer_changed || shape_changed {
+            self.cursor.position = info
+                .PointerPosition
+                .Visible
+                .as_bool()
+                .then_some(info.PointerPosition.Position);
+        }
+        let after = self.cursor.bounds();
+        let mut damage = Vec::with_capacity(2);
+        if before != after {
+            damage.extend(before);
+            damage.extend(after);
+        } else if shape_changed {
+            damage.extend(after);
+        }
+        Ok(damage)
+    }
+
+    fn read_cursor_shape(&self, size: u32) -> Result<Option<CursorShape>, CaptureError> {
+        let mut data = vec![0; size as usize];
+        let mut required = 0;
+        let mut info = DXGI_OUTDUPL_POINTER_SHAPE_INFO::default();
+        let read = unsafe {
+            self.duplication.GetFramePointerShape(
+                size,
+                data.as_mut_ptr().cast(),
+                &mut required,
+                &mut info,
+            )
+        };
+        if let Err(error) = read {
+            if error.code() != DXGI_ERROR_MORE_DATA || required <= size {
+                return Err(win_error(error));
+            }
+            data.resize(required as usize, 0);
+            unsafe {
+                self.duplication.GetFramePointerShape(
+                    required,
+                    data.as_mut_ptr().cast(),
+                    &mut required,
+                    &mut info,
+                )
+            }
+            .map_err(win_error)?;
+        }
+        if info.Type != DXGI_OUTDUPL_POINTER_SHAPE_TYPE_COLOR.0 as u32
+            || info.Pitch < info.Width.saturating_mul(4)
+            || data.len() < info.Pitch as usize * info.Height as usize
+        {
+            return Ok(None);
+        }
+        data.truncate(info.Pitch as usize * info.Height as usize);
+        Ok(Some(CursorShape {
+            width: info.Width,
+            height: info.Height,
+            pitch: info.Pitch,
+            hotspot: info.HotSpot,
+            bgra: data,
+        }))
+    }
+
+    fn composite_cursor(&mut self, frame: &mut CpuFrame, frame_region: Region) {
+        let Some(bounds) = self.cursor.bounds() else {
+            return;
+        };
+        if frame_region.intersection(bounds).is_none() {
+            return;
+        }
+        let Some(shape) = self.cursor.shape.as_ref() else {
+            return;
+        };
+        let mut composed = false;
+        for y in 0..shape.height as i32 {
+            let destination_y = bounds.y + y - frame_region.y;
+            if !(0..frame.height as i32).contains(&destination_y) {
+                continue;
+            }
+            for x in 0..shape.width as i32 {
+                let destination_x = bounds.x + x - frame_region.x;
+                if !(0..frame.width as i32).contains(&destination_x) {
+                    continue;
+                }
+                let source = y as usize * shape.pitch as usize + x as usize * 4;
+                let destination =
+                    destination_y as usize * frame.stride + destination_x as usize * 4;
+                composed |= blend_bgra(
+                    &mut frame.data[destination..destination + 4],
+                    &shape.bgra[source..source + 4],
+                );
+            }
+        }
+        if composed {
+            self.stats.cursor_composited_updates += 1;
+        }
     }
 
     fn readback_full(&self, texture: &ID3D11Texture2D) -> Result<CpuFrame, CaptureError> {
@@ -543,6 +702,21 @@ impl Session {
         .map_err(win_error)?;
         Ok(rects)
     }
+}
+
+fn blend_bgra(destination: &mut [u8], source: &[u8]) -> bool {
+    let alpha = source[3] as u16;
+    if alpha == 0 {
+        return false;
+    }
+    for channel in 0..3 {
+        let foreground = source[channel] as u16;
+        let background = destination[channel] as u16;
+        destination[channel] =
+            ((foreground * alpha + background * (255 - alpha) + 127) / 255) as u8;
+    }
+    destination[3] = 255;
+    true
 }
 
 /// DXGI move metadata names the pixels copied to `DestinationRect`, but the
@@ -750,5 +924,14 @@ mod tests {
             ]),
             vec![Region::new(0, 0, 20, 20).unwrap()]
         );
+    }
+
+    #[test]
+    fn cursor_blending_preserves_background_for_transparent_pixels() {
+        let mut destination = [10, 20, 30, 40];
+        assert!(!blend_bgra(&mut destination, &[1, 2, 3, 0]));
+        assert_eq!(destination, [10, 20, 30, 40]);
+        assert!(blend_bgra(&mut destination, &[110, 120, 130, 128]));
+        assert_eq!(destination, [60, 70, 80, 255]);
     }
 }

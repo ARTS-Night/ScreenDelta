@@ -19,17 +19,21 @@ read back independently as `Delta`; timeout and out-of-region damage become
 to `Full`. Delta regions are relative to the selected capture canvas, not the
 virtual-desktop origin.
 
-Multi-monitor composition, DXGI move-rect handling, cursor metadata, and
-non-Windows backends are intentionally not implemented yet.
+Multi-monitor composition and non-Windows backends are intentionally not
+implemented yet. DXGI move rectangles contribute source/destination Delta
+candidates. `CursorCapture::Include` composites DXGI Color cursor shapes into
+CPU Full/Delta pixels; unsupported Monochrome and Masked Color shapes remain
+excluded rather than corrupting the canvas.
 
 ## Example
 
 ```rust
-use screendelta::{monitors, CaptureConfig, CaptureSession, CaptureSource};
+use screendelta::{CursorCapture, monitors, CaptureConfig, CaptureSession, CaptureSource};
 
 let monitor = monitors()?.remove(0);
 let mut capture = CaptureSession::start(CaptureConfig {
     source: CaptureSource::Monitor(monitor.id),
+    cursor: CursorCapture::Exclude,
 })?;
 let pixels = capture.next_frame()?.readback()?;
 println!("{} x {}", pixels.width, pixels.height);

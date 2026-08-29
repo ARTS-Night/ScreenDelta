@@ -1,7 +1,8 @@
 use std::time::{Duration, Instant};
 
 use screendelta::{
-    CaptureConfig, CaptureSession, CaptureSource, CaptureUpdate, FramePacer, monitors,
+    CaptureConfig, CaptureSession, CaptureSource, CaptureUpdate, CursorCapture, FramePacer,
+    monitors,
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -19,6 +20,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .ok_or("No monitor available")?;
     let mut capture = CaptureSession::start(CaptureConfig {
         source: CaptureSource::Monitor(monitor.id),
+        cursor: CursorCapture::Exclude,
     })?;
     let mut full = 0;
     let mut delta = 0;
