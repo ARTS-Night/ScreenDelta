@@ -110,9 +110,10 @@ clone. `DeltaRegion::pixels` has the same `CpuFrame` BGRA8 format and stride
 rules as a full frame.
 
 `CaptureStats` is a cheap snapshot for diagnostics. It separates OS
-acquisitions, Full/Delta/Unchanged decisions, pointer-only updates, payload
-bytes, staging allocations, acquire wait, and readback time. Call `stats()`
-after a run rather than logging every frame.
+acquisitions (including `os_frames_coalesced` before ScreenDelta sees them),
+Full/Delta/Unchanged decisions, pointer-only updates, payload bytes, staging
+allocations, acquire wait, and readback time. Call `stats()` after a run rather
+than logging every frame.
 
 `CursorCapture::Exclude` avoids cursor pixels, `Include` composites supported
 DXGI Color shapes, and `System` draws a best-effort Windows standard cursor.

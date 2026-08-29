@@ -162,6 +162,7 @@ impl Session {
             Err(error) => return Err(win_error(error)),
         }
         self.stats.os_frames_acquired += 1;
+        self.stats.os_frames_coalesced += u64::from(info.AccumulatedFrames.saturating_sub(1));
         if let Err(error) = self.update_cursor(&info, !self.emitted_initial) {
             unsafe { self.duplication.ReleaseFrame() }.map_err(win_error)?;
             return Err(error);
@@ -274,6 +275,7 @@ impl Session {
             Err(error) => return Err(win_error(error)),
         }
         self.stats.os_frames_acquired += 1;
+        self.stats.os_frames_coalesced += u64::from(info.AccumulatedFrames.saturating_sub(1));
         let pointer_changed = info.LastMouseUpdateTime != 0
             && info.LastMouseUpdateTime != self.last_pointer_update_time;
         if pointer_changed {

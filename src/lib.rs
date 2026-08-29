@@ -125,6 +125,9 @@ pub struct CaptureConfig {
 pub struct CaptureStats {
     /// Frames acquired from DXGI before ScreenDelta's filtering.
     pub os_frames_acquired: u64,
+    /// Desktop frames DXGI had already coalesced before acquisition.
+    /// This is distinct from ScreenDelta's intentional unchanged/delta filtering.
+    pub os_frames_coalesced: u64,
     pub frames_captured: u64,
     pub full_updates: u64,
     pub full_initial_updates: u64,
