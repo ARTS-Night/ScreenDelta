@@ -85,6 +85,41 @@ interactive Windows session.
 For repeatable Windows workload measurements, see
 [`docs/controlled-benchmark.md`](docs/controlled-benchmark.md).
 
+## API guide
+
+`monitors()` returns the physical-pixel monitors available to the current
+Windows session. Start a session with either a monitor ID or a region that is
+fully contained by one monitor:
+
+```rust
+let monitor = screendelta::monitors()?.remove(0);
+let mut session = screendelta::CaptureSession::start(
+    screendelta::CaptureConfig {
+        source: screendelta::CaptureSource::Monitor(monitor.id),
+        cursor: screendelta::CursorCapture::Exclude,
+    },
+)?;
+```
+
+Use `next_frame()` when every acquired frame is needed. Use
+`try_next_update(timeout)` for the delta pipeline. The first result is always
+`CaptureUpdate::Full`; later results are `Delta` (changed, canvas-local
+regions) or `Unchanged` (timestamp and index only). A `Frame` owns its CPU
+buffer: `into_readback()` moves it, while `readback()` returns a compatibility
+clone. `DeltaRegion::pixels` has the same `CpuFrame` BGRA8 format and stride
+rules as a full frame.
+
+`CaptureStats` is a cheap snapshot for diagnostics. It separates OS
+acquisitions, Full/Delta/Unchanged decisions, pointer-only updates, payload
+bytes, staging allocations, acquire wait, and readback time. Call `stats()`
+after a run rather than logging every frame.
+
+`CursorCapture::Exclude` avoids cursor pixels, `Include` composites supported
+DXGI Color shapes, and `System` draws a best-effort Windows standard cursor.
+All public types are platform-neutral; Windows/DXGI handles never cross the
+API boundary. `CaptureSession` and its frames are not `Send` promises and
+should be owned by the capture worker that consumes them.
+
 ## Validation
 
 `cargo fmt --check`, `cargo check`, and `cargo test` are expected to pass.
