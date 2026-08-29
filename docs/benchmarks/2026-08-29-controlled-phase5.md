@@ -3,7 +3,7 @@
 Interactive Windows desktop, 1366 x 768, release examples, ten-second GDI
 stimulus. Raw CSV remains under ignored `target/bench-results`.
 
-## Transport-policy matrix
+## Pre-correction transport-policy matrix
 
 The full seven-scenario matrix was rerun after the bounded Delta staging cache
 was added. This run is `ScreenDelta_2026-08-29_22-05-45.csv`; timings are
@@ -54,6 +54,35 @@ comparison is that `full_empty_damage_updates` falls to zero.
 the correction. The benchmark launcher now parses both `-Fps 15,30` and
 space-separated values as independent rates, preventing an accidental `1530`
 FPS test.
+
+## Final regression matrix
+
+The complete matrix was then rerun after the correction
+(`ScreenDelta_2026-08-29_22-14-46.csv`). There are no `EmptyDamage` Full
+fallbacks. The expected large-damage fallback remains for window movement and
+full motion, while small/typing/scroll continue to prefer Delta. `Readback ms`
+is aggregate CPU readback time for the ten-second run.
+
+| Scenario / FPS | Full | Delta | Unchanged | Pointer-only | Full MiB | Delta MiB | Readback ms |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| static / 15 | 1 | 4 | 146 | 145 | 3.00 | 0.02 | 81.05 |
+| static / 30 | 1 | 11 | 289 | 193 | 3.00 | 0.04 | 98.03 |
+| cursor / 15 | 1 | 8 | 142 | 142 | 3.00 | 0.29 | 113.60 |
+| cursor / 30 | 1 | 12 | 288 | 252 | 3.00 | 0.04 | 86.34 |
+| small / 15 | 2 | 135 | 14 | 14 | 6.00 | 2.01 | 901.20 |
+| small / 30 | 1 | 183 | 117 | 74 | 3.00 | 2.44 | 1.76 |
+| typing / 15 | 1 | 134 | 16 | 16 | 3.00 | 1.29 | 691.70 |
+| typing / 30 | 1 | 191 | 109 | 63 | 3.00 | 1.88 | 1.89 |
+| scroll / 15 | 1 | 131 | 19 | 19 | 3.00 | 17.68 | 859.56 |
+| scroll / 30 | 1 | 180 | 120 | 74 | 3.00 | 24.40 | 1.91 |
+| window move / 15 | 146 | 1 | 4 | 4 | 438.00 | 0.00 | 1.40 |
+| window move / 30 | 200 | 10 | 91 | 54 | 600.00 | 0.27 | 2.21 |
+| full / 15 | 144 | 0 | 7 | 7 | 432.00 | 0.00 | 995.78 |
+| full / 30 | 186 | 2 | 113 | 44 | 558.00 | 0.01 | 2.03 |
+
+The 15-FPS small, typing, scroll, and full-motion readback totals are retained
+as observed outliers; their 30-FPS counterparts were substantially lower.
+They demonstrate host/compositor variance, not a measured causal regression.
 
 ## Decision
 
