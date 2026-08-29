@@ -119,6 +119,6 @@ requested; Hidden retains the low-readback pointer-only path.
 Keep the internal `<= 32 regions` and `< 50% dirty-area` Delta policy. Keep
 only overlap merging for correctness; do not add nearby-rect merging or a
 GPU-comparison system without a measured bottleneck. Do not claim cursor
-capture support from pointer metadata alone: cursor composition is a separate
-future feature; pointer-only acquisitions are deliberately not turned into
-false Full frames.
+capture support from pointer metadata alone: Color cursor composition is now
+opt-in, while Hidden pointer-only acquisitions are deliberately not turned into
+false Full frames. Monochrome and Masked Color shapes remain unsupported.

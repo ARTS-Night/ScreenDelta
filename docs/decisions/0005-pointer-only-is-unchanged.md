@@ -12,8 +12,9 @@ moved on an otherwise static desktop.
 
 When there are neither relevant dirty rectangles nor DXGI move rectangles,
 ScreenDelta emits `CaptureUpdate::Unchanged`. If pointer metadata changed, it
-also increments `CaptureStats::pointer_only_updates`. Move rectangles continue
-to select Full because the public update model does not yet express a move.
+also increments `CaptureStats::pointer_only_updates`. This remains the
+`CursorCapture::Exclude` / Hidden policy. Move rectangles later became Delta
+candidates in decision 0005-move-rect-delta-candidates.
 
 ## Consequences
 
@@ -21,3 +22,5 @@ This removes a false full-frame transfer and makes the statistic visible in
 controlled benchmarks. It intentionally does not pretend to capture a cursor:
 an opt-in cursor-composition API must provide real cursor pixels and damage for
 both the old and new cursor locations before it can be exposed as a Delta.
+That condition was met for Color shapes by decision 0006-color-cursor-
+composition; Monochrome and Masked Color shapes remain deferred.
