@@ -1,5 +1,8 @@
 param(
-    [int[]]$Fps = @(15, 30),
+    # PowerShell passes `-File ... -Fps 15,30` to a script as one token on
+    # some hosts.  Keep the external interface tolerant and parse the list
+    # ourselves so a requested 15,30 matrix never turns into 1530 FPS.
+    [string[]]$Fps = @('15', '30'),
     [int]$Seconds = 10,
     [string[]]$Scenario = @('static', 'cursor', 'small', 'typing', 'scroll', 'window-move', 'full')
 )
@@ -14,8 +17,18 @@ if (!(Test-Path $stimulus) -or !(Test-Path $poll)) {
 }
 $resultDir = Join-Path $root 'target\bench-results'
 New-Item -ItemType Directory -Force -Path $resultDir | Out-Null
+$rates = @(
+    $Fps |
+        ForEach-Object { $_ -split ',' } |
+        Where-Object { $_ -match '^\d+$' } |
+        ForEach-Object { [int]$_ }
+)
+if ($rates.Count -eq 0 -or ($rates | Where-Object { $_ -le 0 })) {
+    throw 'Fps must contain one or more positive integer values.'
+}
+
 $rows = foreach ($name in $Scenario) {
-    foreach ($rate in $Fps) {
+    foreach ($rate in $rates) {
         $stimulusInfo = [Diagnostics.ProcessStartInfo]::new($stimulus, "$name $($Seconds + 2)")
         $stimulusInfo.WorkingDirectory = $root
         $stimulusInfo.UseShellExecute = $false
@@ -55,6 +68,7 @@ $rows = foreach ($name in $Scenario) {
             pointer_updates = $stats['pointer_updates']
             separate_pointer_updates = $stats['separate_pointer_updates']
             pointer_shape_updates = $stats['pointer_shape_updates']
+            pointer_only_updates = $stats['pointer_only_updates']
             full_initial_updates = $stats['full_initial_updates']
             full_empty_damage_updates = $stats['full_empty_damage_updates']
             full_large_damage_updates = $stats['full_large_damage_updates']

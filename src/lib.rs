@@ -128,6 +128,9 @@ pub struct CaptureStats {
     pub pointer_updates: u64,
     pub separate_pointer_updates: u64,
     pub pointer_shape_updates: u64,
+    /// DXGI acquisitions that changed only pointer metadata. The desktop
+    /// texture has no matching pixel damage, so they are not full read back.
+    pub pointer_only_updates: u64,
     pub full_payload_bytes: u64,
     pub delta_payload_bytes: u64,
     pub unchanged_updates: u64,

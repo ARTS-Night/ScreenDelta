@@ -225,9 +225,9 @@ impl Session {
             Err(error) => return Err(win_error(error)),
         }
         self.stats.os_frames_acquired += 1;
-        if info.LastMouseUpdateTime != 0
-            && info.LastMouseUpdateTime != self.last_pointer_update_time
-        {
+        let pointer_changed = info.LastMouseUpdateTime != 0
+            && info.LastMouseUpdateTime != self.last_pointer_update_time;
+        if pointer_changed {
             self.last_pointer_update_time = info.LastMouseUpdateTime;
             self.stats.pointer_updates += 1;
             if info.PointerPosition.Visible.as_bool() {
@@ -259,6 +259,20 @@ impl Session {
             .collect();
         if !dirty.is_empty() && relevant.is_empty() {
             self.stats.region_skipped_updates += 1;
+            self.stats.unchanged_updates += 1;
+            unsafe { self.duplication.ReleaseFrame() }.map_err(win_error)?;
+            return Ok(CaptureUpdate::Unchanged {
+                timestamp: self.started.elapsed(),
+                index: self.next_index,
+            });
+        }
+        if dirty.is_empty() && moves.is_empty() {
+            // Desktop Duplication reports pointer updates separately from the
+            // texture. Until a caller asks for cursor composition, a
+            // pointer-only acquisition has no desktop pixels to transport.
+            if pointer_changed {
+                self.stats.pointer_only_updates += 1;
+            }
             self.stats.unchanged_updates += 1;
             unsafe { self.duplication.ReleaseFrame() }.map_err(win_error)?;
             return Ok(CaptureUpdate::Unchanged {
