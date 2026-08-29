@@ -25,3 +25,6 @@ duration, monitor, and FPS.
 The CSV also records fallback-reason, Move Rect, and pointer metadata counters.
 Those counters are diagnostic evidence; they do not themselves change the
 public update transport.
+
+The first recorded matrix and its adaptive-policy decision are in
+[`benchmarks/2026-08-29-controlled-phase5.md`](benchmarks/2026-08-29-controlled-phase5.md).
