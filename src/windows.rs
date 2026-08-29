@@ -39,6 +39,7 @@ pub(crate) struct Session {
     started: Instant,
     emitted_initial: bool,
     next_index: u64,
+    last_pointer_update_time: i64,
     stats: CaptureStats,
 }
 impl Session {
@@ -75,6 +76,7 @@ impl Session {
             started: Instant::now(),
             emitted_initial: false,
             next_index: 0,
+            last_pointer_update_time: 0,
             stats: CaptureStats::default(),
         })
     }
@@ -213,7 +215,10 @@ impl Session {
             Err(error) => return Err(win_error(error)),
         }
         self.stats.os_frames_acquired += 1;
-        if info.LastMouseUpdateTime != 0 {
+        if info.LastMouseUpdateTime != 0
+            && info.LastMouseUpdateTime != self.last_pointer_update_time
+        {
+            self.last_pointer_update_time = info.LastMouseUpdateTime;
             self.stats.pointer_updates += 1;
             if info.PointerPosition.Visible.as_bool() {
                 self.stats.separate_pointer_updates += 1;
