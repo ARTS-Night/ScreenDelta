@@ -25,6 +25,16 @@ use windows::{
                 DXGI_OUTDUPL_POINTER_SHAPE_TYPE_COLOR, IDXGIAdapter1, IDXGIFactory1, IDXGIOutput,
                 IDXGIOutput1, IDXGIOutputDuplication,
             },
+            Gdi::{
+                BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateCompatibleDC, CreateDIBSection,
+                DIB_RGB_COLORS, DeleteDC, DeleteObject, HGDIOBJ, SelectObject,
+            },
+        },
+        UI::WindowsAndMessaging::{
+            CURSOR_SHOWING, CURSORINFO, DI_NORMAL, DrawIconEx, GetCursorInfo, GetIconInfo,
+            GetSystemMetrics, HCURSOR, HICON, ICONINFO, IDC_APPSTARTING, IDC_ARROW, IDC_HAND,
+            IDC_IBEAM, IDC_SIZEALL, IDC_SIZENESW, IDC_SIZENS, IDC_SIZENWSE, IDC_SIZEWE, IDC_WAIT,
+            LoadCursorW, SM_CXCURSOR, SM_CYCURSOR,
         },
     },
     core::Interface,
@@ -433,15 +443,23 @@ impl Session {
         }
         let before = self.cursor.bounds();
         let shape_changed = info.PointerShapeBufferSize != 0;
-        if shape_changed {
-            self.cursor.shape = self.read_cursor_shape(info.PointerShapeBufferSize)?;
-        }
-        if pointer_changed || shape_changed {
-            self.cursor.position = info
-                .PointerPosition
-                .Visible
-                .as_bool()
-                .then_some(info.PointerPosition.Position);
+        match self.capture_cursor {
+            CursorCapture::Include => {
+                if shape_changed {
+                    self.cursor.shape = self.read_cursor_shape(info.PointerShapeBufferSize)?;
+                }
+                if pointer_changed || shape_changed {
+                    self.cursor.position = info
+                        .PointerPosition
+                        .Visible
+                        .as_bool()
+                        .then_some(info.PointerPosition.Position);
+                }
+            }
+            CursorCapture::System if pointer_changed || shape_changed => {
+                self.cursor = system_cursor()?;
+            }
+            CursorCapture::Exclude | CursorCapture::System => {}
         }
         let after = self.cursor.bounds();
         let mut damage = Vec::with_capacity(2);
@@ -717,6 +735,109 @@ fn blend_bgra(destination: &mut [u8], source: &[u8]) -> bool {
     }
     destination[3] = 255;
     true
+}
+
+fn system_cursor() -> Result<CursorState, CaptureError> {
+    let mut info = CURSORINFO {
+        cbSize: std::mem::size_of::<CURSORINFO>() as u32,
+        ..Default::default()
+    };
+    unsafe { GetCursorInfo(&mut info) }.map_err(win_error)?;
+    if info.flags.0 & CURSOR_SHOWING.0 == 0 {
+        return Ok(CursorState::default());
+    }
+    let cursor = matching_standard_cursor(info.hCursor)?;
+    Ok(CursorState {
+        position: Some(info.ptScreenPos),
+        shape: Some(rasterize_cursor(cursor)?),
+    })
+}
+
+fn matching_standard_cursor(current: HCURSOR) -> Result<HCURSOR, CaptureError> {
+    for id in [
+        IDC_ARROW,
+        IDC_HAND,
+        IDC_IBEAM,
+        IDC_SIZEALL,
+        IDC_SIZENESW,
+        IDC_SIZENS,
+        IDC_SIZENWSE,
+        IDC_SIZEWE,
+        IDC_WAIT,
+        IDC_APPSTARTING,
+    ] {
+        let cursor = unsafe { LoadCursorW(None, id) }.map_err(win_error)?;
+        if cursor.0 == current.0 {
+            return Ok(cursor);
+        }
+    }
+    unsafe { LoadCursorW(None, IDC_ARROW) }.map_err(win_error)
+}
+
+fn rasterize_cursor(cursor: HCURSOR) -> Result<CursorShape, CaptureError> {
+    let width = unsafe { GetSystemMetrics(SM_CXCURSOR) }.max(1) as u32;
+    let height = unsafe { GetSystemMetrics(SM_CYCURSOR) }.max(1) as u32;
+    let mut icon = ICONINFO::default();
+    unsafe { GetIconInfo(HICON(cursor.0), &mut icon) }.map_err(win_error)?;
+    let bitmap_info = BITMAPINFO {
+        bmiHeader: BITMAPINFOHEADER {
+            biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+            biWidth: width as i32,
+            // A top-down DIB matches the CPU frame row order.
+            biHeight: -(height as i32),
+            biPlanes: 1,
+            biBitCount: 32,
+            biCompression: BI_RGB.0,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let mut bits = std::ptr::null_mut();
+    let bitmap =
+        unsafe { CreateDIBSection(None, &bitmap_info, DIB_RGB_COLORS, &mut bits, None, 0) }
+            .map_err(win_error)?;
+    let dc = unsafe { CreateCompatibleDC(None) };
+    let old = unsafe { SelectObject(dc, HGDIOBJ(bitmap.0)) };
+    let result = (|| {
+        unsafe {
+            DrawIconEx(
+                dc,
+                0,
+                0,
+                HICON(cursor.0),
+                width as i32,
+                height as i32,
+                0,
+                None,
+                DI_NORMAL,
+            )
+        }
+        .map_err(win_error)?;
+        let bytes = width as usize * height as usize * 4;
+        let bgra = unsafe { slice::from_raw_parts(bits.cast::<u8>(), bytes) }.to_vec();
+        Ok(CursorShape {
+            width,
+            height,
+            pitch: width * 4,
+            hotspot: windows::Win32::Foundation::POINT {
+                x: icon.xHotspot as i32,
+                y: icon.yHotspot as i32,
+            },
+            bgra,
+        })
+    })();
+    unsafe {
+        let _ = SelectObject(dc, old);
+        let _ = DeleteDC(dc);
+        let _ = DeleteObject(HGDIOBJ(bitmap.0));
+        if !icon.hbmMask.0.is_null() {
+            let _ = DeleteObject(HGDIOBJ(icon.hbmMask.0));
+        }
+        if !icon.hbmColor.0.is_null() {
+            let _ = DeleteObject(HGDIOBJ(icon.hbmColor.0));
+        }
+    }
+    result
 }
 
 /// DXGI move metadata names the pixels copied to `DestinationRect`, but the

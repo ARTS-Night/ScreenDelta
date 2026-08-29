@@ -111,6 +111,8 @@ pub enum CursorCapture {
     #[default]
     Exclude,
     Include,
+    /// Best-effort rendering with a matching Windows standard cursor shape.
+    System,
 }
 
 #[derive(Clone, Debug)]

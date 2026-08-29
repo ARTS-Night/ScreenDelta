@@ -24,6 +24,8 @@ implemented yet. DXGI move rectangles contribute source/destination Delta
 candidates. `CursorCapture::Include` composites DXGI Color cursor shapes into
 CPU Full/Delta pixels; unsupported Monochrome and Masked Color shapes remain
 excluded rather than corrupting the canvas.
+`CursorCapture::System` instead renders a matching Windows standard cursor
+(Arrow, Hand, I-Beam, Resize, Busy, or Wait), with Arrow as a safe fallback.
 
 ## Example
 
