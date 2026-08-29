@@ -104,6 +104,16 @@ new move path.  The source/destination semantics and overlap merge are covered
 by a focused Windows unit test; runtime counters make a future host that emits
 move metadata measurable.
 
+## Cursor composition follow-up — 2026-08-30
+
+At 1366×768, the 15-FPS cursor stimulus was recorded for three seconds through
+QuickGIFlick's release binary. With `CursorCapture::Include`, the two GIF
+modes observed 44 Delta updates, 46 cursor composites, and 3.01-second GIFs.
+With `CursorCapture::Exclude` (QuickGIFlick Hidden), 36–37 pointer-only
+acquisitions became Unchanged and the GIFs were exactly 3.00 seconds. This
+confirms that cursor movement is visual Delta work only when inclusion is
+requested; Hidden retains the low-readback pointer-only path.
+
 ## Decision
 
 Keep the internal `<= 32 regions` and `< 50% dirty-area` Delta policy. Keep
