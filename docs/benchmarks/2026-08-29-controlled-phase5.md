@@ -84,10 +84,31 @@ The 15-FPS small, typing, scroll, and full-motion readback totals are retained
 as observed outliers; their 30-FPS counterparts were substantially lower.
 They demonstrate host/compositor variance, not a measured causal regression.
 
+## Move-rectangle follow-up — 2026-08-30
+
+`cd90d06` converts each DXGI move rectangle into source and destination
+damage candidates, then merges overlapping candidates before the existing
+Delta heuristic.  A QuickGIFlick controlled `window-move` run at 1366×768 for
+three seconds exercised the end-to-end recording path:
+
+| FPS | GIF mode | Updates | GIF frames | GIF duration | Readback ms | DXGI move rects |
+| ---: | --- | ---: | ---: | ---: | ---: | ---: |
+| 10 | Full | 30 | 31 | 3.01 s | 60.21 | 0 |
+| 15 | Full | 45 | 46 | 3.01 s | 80.30 | 0 |
+| 20 | Full | 60 | 61 | 3.01 s | 91.34 | 0 |
+| 30 | Full | 89 | 90 | 3.01 s | 122.19 | 0 |
+
+On this compositor, moving the stimulus window produced Dirty Rects rather
+than DXGI Move Rects, so this run does **not** claim a performance gain for the
+new move path.  The source/destination semantics and overlap merge are covered
+by a focused Windows unit test; runtime counters make a future host that emits
+move metadata measurable.
+
 ## Decision
 
-Keep the internal `<= 32 regions` and `< 50% dirty-area` Delta policy. Do not
-add a rect-merge or GPU-comparison system without a measured bottleneck. Do
-not claim cursor capture support from pointer metadata alone: cursor composition
-is a separate future feature; pointer-only acquisitions are deliberately not
-turned into false Full frames.
+Keep the internal `<= 32 regions` and `< 50% dirty-area` Delta policy. Keep
+only overlap merging for correctness; do not add nearby-rect merging or a
+GPU-comparison system without a measured bottleneck. Do not claim cursor
+capture support from pointer metadata alone: cursor composition is a separate
+future feature; pointer-only acquisitions are deliberately not turned into
+false Full frames.
