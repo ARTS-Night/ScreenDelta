@@ -246,18 +246,23 @@ impl Session {
             }
         };
         self.stats.move_rects_observed += moves.len() as u64;
-        let dirty = match self.dirty_regions() {
+        let mut damage = match self.dirty_regions() {
             Ok(dirty) => dirty,
             Err(error) => {
                 unsafe { self.duplication.ReleaseFrame() }.map_err(win_error)?;
                 return Err(error);
             }
         };
-        let relevant: Vec<_> = dirty
-            .iter()
-            .filter_map(|damage| damage.intersection(self.region))
-            .collect();
-        if !dirty.is_empty() && relevant.is_empty() {
+        let move_damage = move_damage_regions(&moves, self.output_region);
+        self.stats.move_damage_regions += move_damage.len() as u64;
+        damage.extend(move_damage);
+        let relevant = merge_overlapping_regions(
+            damage
+                .iter()
+                .filter_map(|damage| damage.intersection(self.region))
+                .collect(),
+        );
+        if !damage.is_empty() && relevant.is_empty() {
             self.stats.region_skipped_updates += 1;
             self.stats.unchanged_updates += 1;
             unsafe { self.duplication.ReleaseFrame() }.map_err(win_error)?;
@@ -266,7 +271,7 @@ impl Session {
                 index: self.next_index,
             });
         }
-        if dirty.is_empty() && moves.is_empty() {
+        if damage.is_empty() {
             // Desktop Duplication reports pointer updates separately from the
             // texture. Until a caller asks for cursor composition, a
             // pointer-only acquisition has no desktop pixels to transport.
@@ -540,6 +545,66 @@ impl Session {
     }
 }
 
+/// DXGI move metadata names the pixels copied to `DestinationRect`, but the
+/// source rectangle is damaged too: it now contains the exposed background.
+/// Both rectangles are relative to the output, so make them desktop regions
+/// before intersecting the caller's capture area.
+fn move_damage_regions(moves: &[DXGI_OUTDUPL_MOVE_RECT], output: Region) -> Vec<Region> {
+    let mut damage = Vec::with_capacity(moves.len().saturating_mul(2));
+    for moved in moves {
+        let destination = moved.DestinationRect;
+        let width = destination.right.saturating_sub(destination.left) as u32;
+        let height = destination.bottom.saturating_sub(destination.top) as u32;
+        let destination = Region::new(
+            output.x.saturating_add(destination.left),
+            output.y.saturating_add(destination.top),
+            width,
+            height,
+        );
+        let source = Region::new(
+            output.x.saturating_add(moved.SourcePoint.x),
+            output.y.saturating_add(moved.SourcePoint.y),
+            width,
+            height,
+        );
+        damage.extend(destination.into_iter().chain(source));
+    }
+    damage
+}
+
+fn merge_overlapping_regions(mut regions: Vec<Region>) -> Vec<Region> {
+    let mut merged: Vec<Region> = Vec::with_capacity(regions.len());
+    while let Some(mut region) = regions.pop() {
+        let mut index = 0;
+        while index < merged.len() {
+            if merged[index].intersection(region).is_some() {
+                region = region_union(merged.swap_remove(index), region);
+                index = 0;
+            } else {
+                index += 1;
+            }
+        }
+        merged.push(region);
+    }
+    merged
+}
+
+fn region_union(left: Region, right: Region) -> Region {
+    let x = left.x.min(right.x);
+    let y = left.y.min(right.y);
+    let right_edge = (i64::from(left.x) + i64::from(left.size.width))
+        .max(i64::from(right.x) + i64::from(right.size.width));
+    let bottom_edge = (i64::from(left.y) + i64::from(left.size.height))
+        .max(i64::from(right.y) + i64::from(right.size.height));
+    Region::new(
+        x,
+        y,
+        (right_edge - i64::from(x)) as u32,
+        (bottom_edge - i64::from(y)) as u32,
+    )
+    .expect("union of non-empty regions is non-empty")
+}
+
 #[derive(Clone, Copy)]
 enum FullReason {
     Initial,
@@ -648,6 +713,42 @@ fn device(a: &IDXGIAdapter1) -> Result<(ID3D11Device, ID3D11DeviceContext), Capt
         c.ok_or_else(|| CaptureError::new("D3D11 context missing"))?,
     ))
 }
+
 fn win_error(e: windows::core::Error) -> CaptureError {
     CaptureError::new(e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use windows::Win32::Foundation::POINT;
+
+    #[test]
+    fn move_damage_covers_source_and_destination_then_merges_overlap() {
+        let moved = DXGI_OUTDUPL_MOVE_RECT {
+            SourcePoint: POINT { x: 10, y: 20 },
+            DestinationRect: RECT {
+                left: 30,
+                top: 40,
+                right: 50,
+                bottom: 60,
+            },
+        };
+        let output = Region::new(-100, 50, 1920, 1080).unwrap();
+        assert_eq!(
+            move_damage_regions(&[moved], output),
+            vec![
+                Region::new(-70, 90, 20, 20).unwrap(),
+                Region::new(-90, 70, 20, 20).unwrap(),
+            ]
+        );
+        assert_eq!(
+            merge_overlapping_regions(vec![
+                Region::new(0, 0, 10, 10).unwrap(),
+                Region::new(5, 5, 10, 10).unwrap(),
+                Region::new(10, 10, 10, 10).unwrap(),
+            ]),
+            vec![Region::new(0, 0, 20, 20).unwrap()]
+        );
+    }
 }

@@ -125,6 +125,9 @@ pub struct CaptureStats {
     /// A bounded cache keeps this low without retaining arbitrary sizes.
     pub delta_staging_allocations: u64,
     pub move_rects_observed: u64,
+    /// Candidate regions produced from DXGI move metadata (both the exposed
+    /// source and updated destination areas).
+    pub move_damage_regions: u64,
     pub pointer_updates: u64,
     pub separate_pointer_updates: u64,
     pub pointer_shape_updates: u64,
