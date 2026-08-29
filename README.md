@@ -69,6 +69,19 @@ match capture.try_next_update(Duration::from_millis(16))? {
 Run `cargo run --release --example poll_updates` to print the observed update
 mix and capture timing on an interactive Windows desktop.
 
+For debug diagnostics, use the non-optimized examples (the terminal remains
+visible):
+
+```powershell
+cargo run --example list_monitors
+cargo run --example poll_benchmark -- 15 10
+cargo run --example controlled_stimulus -- small 3
+```
+
+`poll_benchmark` reports capture/readback timing and Full/Delta/Unchanged
+counts. Keep the selected region on one monitor; DXGI capture requires an
+interactive Windows session.
+
 For repeatable Windows workload measurements, see
 [`docs/controlled-benchmark.md`](docs/controlled-benchmark.md).
 
