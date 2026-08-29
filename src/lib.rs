@@ -121,6 +121,9 @@ pub struct CaptureStats {
     pub full_fragmented_damage_updates: u64,
     pub delta_updates: u64,
     pub delta_regions: u64,
+    /// D3D staging textures allocated for variable-size Delta readbacks.
+    /// A bounded cache keeps this low without retaining arbitrary sizes.
+    pub delta_staging_allocations: u64,
     pub move_rects_observed: u64,
     pub pointer_updates: u64,
     pub separate_pointer_updates: u64,

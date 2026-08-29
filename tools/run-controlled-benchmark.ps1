@@ -59,6 +59,7 @@ $rows = foreach ($name in $Scenario) {
             full_empty_damage_updates = $stats['full_empty_damage_updates']
             full_large_damage_updates = $stats['full_large_damage_updates']
             full_fragmented_damage_updates = $stats['full_fragmented_damage_updates']
+            delta_staging_allocations = $stats['delta_staging_allocations']
             readback_ms = $stats['readback']
             raw = $output
         }

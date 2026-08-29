@@ -34,6 +34,8 @@ pub(crate) struct Session {
     context: ID3D11DeviceContext,
     duplication: IDXGIOutputDuplication,
     staging: ID3D11Texture2D,
+    region_staging: Vec<RegionStaging>,
+    next_region_staging: usize,
     region: Region,
     output_region: Region,
     started: Instant,
@@ -41,6 +43,12 @@ pub(crate) struct Session {
     next_index: u64,
     last_pointer_update_time: i64,
     stats: CaptureStats,
+}
+
+struct RegionStaging {
+    width: u32,
+    height: u32,
+    texture: ID3D11Texture2D,
 }
 impl Session {
     pub(crate) fn start(config: CaptureConfig) -> Result<Self, CaptureError> {
@@ -71,6 +79,8 @@ impl Session {
             context,
             duplication,
             staging: staging.ok_or_else(|| CaptureError::new("D3D11 staging texture missing"))?,
+            region_staging: Vec::new(),
+            next_region_staging: 0,
             region: t.region,
             output_region: t.output_region,
             started: Instant::now(),
@@ -349,7 +359,7 @@ impl Session {
     }
 
     fn readback_region(
-        &self,
+        &mut self,
         texture: &ID3D11Texture2D,
         region: Region,
     ) -> Result<CpuFrame, CaptureError> {
@@ -371,12 +381,43 @@ impl Session {
             CPUAccessFlags: D3D11_CPU_ACCESS_READ.0 as u32,
             MiscFlags: 0,
         };
-        let mut staging = None;
-        unsafe { self.device.CreateTexture2D(&desc, None, Some(&mut staging)) }
-            .map_err(win_error)?;
-        let staging =
-            staging.ok_or_else(|| CaptureError::new("D3D11 delta staging texture missing"))?;
+        let staging = self.staging_for(region.size.width, region.size.height, &desc)?;
         self.readback_into(texture, region, &staging)
+    }
+
+    fn staging_for(
+        &mut self,
+        width: u32,
+        height: u32,
+        desc: &D3D11_TEXTURE2D_DESC,
+    ) -> Result<ID3D11Texture2D, CaptureError> {
+        if let Some(staging) = self
+            .region_staging
+            .iter()
+            .find(|staging| staging.width == width && staging.height == height)
+        {
+            return Ok(staging.texture.clone());
+        }
+        let mut texture = None;
+        unsafe { self.device.CreateTexture2D(desc, None, Some(&mut texture)) }
+            .map_err(win_error)?;
+        let texture =
+            texture.ok_or_else(|| CaptureError::new("D3D11 delta staging texture missing"))?;
+        self.stats.delta_staging_allocations += 1;
+        let entry = RegionStaging {
+            width,
+            height,
+            texture: texture.clone(),
+        };
+        const REGION_STAGING_CACHE_CAPACITY: usize = 8;
+        if self.region_staging.len() < REGION_STAGING_CACHE_CAPACITY {
+            self.region_staging.push(entry);
+        } else {
+            let slot = self.next_region_staging % REGION_STAGING_CACHE_CAPACITY;
+            self.region_staging[slot] = entry;
+            self.next_region_staging = self.next_region_staging.wrapping_add(1);
+        }
+        Ok(texture)
     }
 
     fn readback_into(
