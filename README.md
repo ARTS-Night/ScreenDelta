@@ -115,6 +115,12 @@ Full/Delta/Unchanged decisions, pointer-only updates, payload bytes, staging
 allocations, acquire wait, and readback time. Call `stats()` after a run rather
 than logging every frame.
 
+When DXGI reports fragmented or near-full-screen damage after the initial
+frame, ScreenDelta verifies 64×64 CPU tiles against its retained canvas. A
+small verified change is delivered as `Delta`; an identical canvas is
+`Unchanged`. `verified_full_damage_updates` and `verified_unchanged_updates`
+show when this fallback was used.
+
 `CursorCapture::Exclude` avoids cursor pixels, `Include` composites supported
 DXGI Color shapes, and `System` draws a best-effort Windows standard cursor.
 All public types are platform-neutral; Windows/DXGI handles never cross the

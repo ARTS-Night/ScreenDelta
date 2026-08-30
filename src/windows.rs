@@ -55,6 +55,7 @@ pub(crate) struct Session {
     last_pointer_update_time: i64,
     cursor: CursorState,
     capture_cursor: CursorCapture,
+    previous: Option<CpuFrame>,
     stats: CaptureStats,
 }
 
@@ -130,6 +131,7 @@ impl Session {
             last_pointer_update_time: 0,
             cursor: CursorState::default(),
             capture_cursor: config.cursor,
+            previous: None,
             stats: CaptureStats::default(),
         })
     }
@@ -241,6 +243,7 @@ impl Session {
                 region: self.region,
                 cpu,
             };
+            self.previous = Some(frame.cpu.clone());
             self.next_index += 1;
             self.emitted_initial = true;
             Ok(frame)
@@ -395,22 +398,68 @@ impl Session {
                     .map(|region| region.pixels.data.len() as u64)
                     .sum::<u64>();
                 self.stats.readback += readback_started.elapsed();
-                let update = CaptureUpdate::Delta(DeltaFrame {
+                let update = DeltaFrame {
                     timestamp: self.started.elapsed(),
                     index: self.next_index,
                     canvas: self.region.size,
                     regions,
-                });
+                };
+                self.apply_to_previous(&update.regions);
                 self.next_index += 1;
-                Ok(update)
+                Ok(CaptureUpdate::Delta(update))
             } else {
                 let readback_started = Instant::now();
                 let mut frame = self.readback_full(&texture)?;
                 self.composite_cursor(&mut frame, self.region);
                 self.stats.frames_captured += 1;
+                let reason = full_reason.expect("Full fallback needs a reason");
+                if matches!(
+                    reason,
+                    FullReason::LargeDamage | FullReason::FragmentedDamage
+                ) && self.previous.is_some()
+                {
+                    self.stats.verified_full_damage_updates += 1;
+                    let verified = changed_tile_regions(
+                        self.previous.as_ref().expect("previous canvas was checked"),
+                        &frame,
+                    );
+                    if verified.is_empty() {
+                        self.stats.verified_unchanged_updates += 1;
+                        self.stats.unchanged_updates += 1;
+                        self.stats.readback += readback_started.elapsed();
+                        self.previous = Some(frame);
+                        return Ok(CaptureUpdate::Unchanged {
+                            timestamp: self.started.elapsed(),
+                            index: self.next_index,
+                        });
+                    }
+                    let verified_pixels: u64 = verified
+                        .iter()
+                        .map(|region| u64::from(region.size.width) * u64::from(region.size.height))
+                        .sum();
+                    if verified_pixels.saturating_mul(2) < canvas_pixels {
+                        let regions = regions_from_full(&frame, &verified);
+                        self.stats.delta_updates += 1;
+                        self.stats.delta_regions += regions.len() as u64;
+                        self.stats.delta_payload_bytes += regions
+                            .iter()
+                            .map(|region| region.pixels.data.len() as u64)
+                            .sum::<u64>();
+                        self.stats.readback += readback_started.elapsed();
+                        self.previous = Some(frame);
+                        let update = CaptureUpdate::Delta(DeltaFrame {
+                            timestamp: self.started.elapsed(),
+                            index: self.next_index,
+                            canvas: self.region.size,
+                            regions,
+                        });
+                        self.next_index += 1;
+                        return Ok(update);
+                    }
+                }
                 self.stats.full_updates += 1;
                 self.stats.full_payload_bytes += frame.data.len() as u64;
-                match full_reason.expect("Full fallback needs a reason") {
+                match reason {
                     FullReason::Initial => self.stats.full_initial_updates += 1,
                     FullReason::EmptyDamage => self.stats.full_empty_damage_updates += 1,
                     FullReason::LargeDamage => self.stats.full_large_damage_updates += 1,
@@ -418,6 +467,7 @@ impl Session {
                 }
                 self.stats.readback += readback_started.elapsed();
                 self.emitted_initial = true;
+                self.previous = Some(frame.clone());
                 let update = CaptureUpdate::Full(Frame {
                     timestamp: self.started.elapsed(),
                     index: self.next_index,
@@ -554,6 +604,22 @@ impl Session {
 
     fn readback_full(&self, texture: &ID3D11Texture2D) -> Result<CpuFrame, CaptureError> {
         self.readback_into(texture, self.region, &self.staging)
+    }
+
+    fn apply_to_previous(&mut self, regions: &[DeltaRegion]) {
+        let Some(previous) = self.previous.as_mut() else {
+            return;
+        };
+        for region in regions {
+            let row = region.region.size.width as usize * 4;
+            for y in 0..region.region.size.height as usize {
+                let source = y * region.pixels.stride;
+                let destination =
+                    (region.region.y as usize + y) * previous.stride + region.region.x as usize * 4;
+                previous.data[destination..destination + row]
+                    .copy_from_slice(&region.pixels.data[source..source + row]);
+            }
+        }
     }
 
     fn readback_region(
@@ -842,6 +908,96 @@ fn rasterize_cursor(cursor: HCURSOR) -> Result<CursorShape, CaptureError> {
     result
 }
 
+const VERIFICATION_TILE: u32 = 64;
+
+/// When a compositor reports the whole desktop as dirty, verify its pixels in
+/// bounded tiles before retaining another full canvas. This keeps remote or
+/// virtual desktops from turning a small visual change into full-frame storage.
+fn changed_tile_regions(previous: &CpuFrame, current: &CpuFrame) -> Vec<Region> {
+    if previous.width != current.width
+        || previous.height != current.height
+        || previous.format != current.format
+    {
+        return Region::new(0, 0, current.width, current.height)
+            .into_iter()
+            .collect();
+    }
+    let mut regions: Vec<Region> = Vec::new();
+    for y in (0..current.height).step_by(VERIFICATION_TILE as usize) {
+        let height = VERIFICATION_TILE.min(current.height - y);
+        let mut x = 0;
+        while x < current.width {
+            let width = VERIFICATION_TILE.min(current.width - x);
+            if !tile_changed(previous, current, x, y, width, height) {
+                x += width;
+                continue;
+            }
+            let start = x;
+            x += width;
+            while x < current.width {
+                let next_width = VERIFICATION_TILE.min(current.width - x);
+                if !tile_changed(previous, current, x, y, next_width, height) {
+                    break;
+                }
+                x += next_width;
+            }
+            let width = x - start;
+            if let Some(region) = regions.iter_mut().find(|region| {
+                region.x == start as i32
+                    && region.size.width == width
+                    && region.y + region.size.height as i32 == y as i32
+            }) {
+                region.size.height += height;
+            } else {
+                regions.push(
+                    Region::new(start as i32, y as i32, width, height)
+                        .expect("non-empty changed tile run"),
+                );
+            }
+        }
+    }
+    regions
+}
+
+fn tile_changed(
+    previous: &CpuFrame,
+    current: &CpuFrame,
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+) -> bool {
+    let bytes = width as usize * 4;
+    (0..height as usize).any(|row| {
+        let offset = (y as usize + row) * current.stride + x as usize * 4;
+        previous.data[offset..offset + bytes] != current.data[offset..offset + bytes]
+    })
+}
+
+fn regions_from_full(frame: &CpuFrame, regions: &[Region]) -> Vec<DeltaRegion> {
+    regions
+        .iter()
+        .map(|region| {
+            let row = region.size.width as usize * 4;
+            let mut data = vec![0; row * region.size.height as usize];
+            for y in 0..region.size.height as usize {
+                let source = (region.y as usize + y) * frame.stride + region.x as usize * 4;
+                data[y * row..(y + 1) * row].copy_from_slice(&frame.data[source..source + row]);
+            }
+            DeltaRegion {
+                region: *region,
+                pixels: CpuFrame {
+                    width: region.size.width,
+                    height: region.size.height,
+                    stride: row,
+                    format: frame.format,
+                    data,
+                },
+            }
+        })
+        .collect()
+}
+
 /// DXGI move metadata names the pixels copied to `DestinationRect`, but the
 /// source rectangle is damaged too: it now contains the exposed background.
 /// Both rectangles are relative to the output, so make them desktop regions
@@ -1019,6 +1175,28 @@ fn win_error(e: windows::core::Error) -> CaptureError {
 mod tests {
     use super::*;
     use windows::Win32::Foundation::POINT;
+
+    fn cpu_frame(width: u32, height: u32, value: u8) -> CpuFrame {
+        CpuFrame {
+            width,
+            height,
+            stride: width as usize * 4,
+            format: PixelFormat::Bgra8,
+            data: vec![value; width as usize * height as usize * 4],
+        }
+    }
+
+    #[test]
+    fn full_damage_verification_returns_only_changed_tiles() {
+        let previous = cpu_frame(128, 128, 0);
+        let mut current = previous.clone();
+        current.data[(70 * current.stride) + 70 * 4] = 1;
+        assert_eq!(
+            changed_tile_regions(&previous, &current),
+            vec![Region::new(64, 64, 64, 64).unwrap()]
+        );
+        assert!(changed_tile_regions(&previous, &previous).is_empty());
+    }
 
     #[test]
     fn move_damage_covers_source_and_destination_then_merges_overlap() {

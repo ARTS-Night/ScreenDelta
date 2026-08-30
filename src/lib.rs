@@ -134,6 +134,10 @@ pub struct CaptureStats {
     pub full_empty_damage_updates: u64,
     pub full_large_damage_updates: u64,
     pub full_fragmented_damage_updates: u64,
+    /// Large/fragmented DXGI damage reports checked against the prior canvas.
+    pub verified_full_damage_updates: u64,
+    /// Full-damage reports whose pixels matched the prior canvas exactly.
+    pub verified_unchanged_updates: u64,
     pub delta_updates: u64,
     pub delta_regions: u64,
     /// D3D staging textures allocated for variable-size Delta readbacks.
